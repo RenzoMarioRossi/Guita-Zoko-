@@ -17,112 +17,287 @@ def clean_monto(value):
             return 0.0
     return float(value)
 
+def detect_file_type(filename):
+    """Detecta el tipo de archivo basado en el nombre."""
+    filename_lower = filename.lower()
+    
+    if 'planes' in filename_lower:
+        return 'planes'
+    elif 'pami' in filename_lower:
+        return 'pami'
+    elif 'ooss' in filename_lower:
+        return 'ooss'
+    else:
+        return 'usuario'
+
+def get_column_mapping(file_type):
+    """Retorna el mapeo de columnas según el tipo de archivo."""
+    
+    base_mapping = {
+        'nombre': 'Nombre',
+        'fecha': 'Fecha'
+    }
+    
+    if file_type == 'planes':
+        return {
+            **base_mapping,
+            'hc': 'HC',
+            'historia': 'HC',
+            'historia_clinica': 'HC',
+            'hono_impu1': 'Monto',
+            'cobertura': 'Cobertura'
+        }
+    
+    elif file_type == 'pami':
+        return {
+            **base_mapping,
+            'hc': 'HC',
+            'historia': 'HC',
+            'historia_clinica': 'HC',
+            'hono_impu1': 'Monto',
+            'desgrupo': 'Desgrupo'
+        }
+    
+    elif file_type == 'ooss':
+        return {
+            **base_mapping,
+            'historia': 'HC',  # En OOSS la HC se llama "historia"
+            'hc': 'HC',
+            'historia_clinica': 'HC',
+            'hono_impu1': 'Monto',
+            'desc_cob': 'Desc_Cob'
+        }
+    
+    else:  # archivo usuario
+        return {
+            **base_mapping,
+            'hc': 'HC',
+            'historia': 'HC',
+            'historia_clinica': 'HC',
+            'paciente': 'Nombre',
+            'monto': 'Monto',
+            'hora': 'Hora'
+        }
+
+def process_dataframe(df, file_path):
+    """Procesa un DataFrame según el tipo de archivo."""
+    filename = os.path.basename(file_path)
+    file_type = detect_file_type(filename)
+    
+    # Limpiar nombres de columnas
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    
+    # Obtener mapeo para este tipo de archivo
+    column_mapping = get_column_mapping(file_type)
+    
+    # Renombrar columnas
+    df = df.rename(columns=column_mapping)
+    
+    # Verificar columnas esenciales
+    required_cols = ['Nombre', 'HC', 'Fecha']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        # Crear columnas faltantes con valores nulos
+        for col in missing_cols:
+            df[col] = np.nan
+    
+    # Procesar HC
+    if 'HC' in df.columns:
+        df['HC'] = df['HC'].astype(str).str.strip()
+    
+    # Procesar Fecha
+    if 'Fecha' in df.columns:
+        df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce', dayfirst=True).dt.date
+    
+    # Procesar Monto si existe y tiene datos
+    if 'Monto' in df.columns:
+        df['Monto'] = df['Monto'].apply(clean_monto)
+    else:
+        df['Monto'] = 0.0
+    
+    # Agregar columna para identificar el archivo origen
+    df['Archivo_Origen'] = filename
+    df['Tipo_Archivo'] = file_type
+    
+    # Seleccionar columnas relevantes según el tipo
+    base_cols = ['HC', 'Nombre', 'Fecha', 'Monto', 'Archivo_Origen', 'Tipo_Archivo']
+    
+    # Agregar columnas específicas según el tipo
+    specific_cols = []
+    if file_type == 'planes' and 'Cobertura' in df.columns:
+        specific_cols.append('Cobertura')
+    elif file_type == 'pami' and 'Desgrupo' in df.columns:
+        specific_cols.append('Desgrupo')
+    elif file_type == 'ooss' and 'Desc_Cob' in df.columns:
+        specific_cols.append('Desc_Cob')
+    elif file_type == 'usuario' and 'Hora' in df.columns:
+        specific_cols.append('Hora')
+    
+    final_cols = base_cols + specific_cols
+    
+    # Filtrar solo las columnas que existen
+    existing_cols = [col for col in final_cols if col in df.columns]
+    
+    return df[existing_cols]
+
 def compare_records(user_file, hospital_files, output_dir=None):
     """Compara registro con los del hospital y genera un Excel con discrepancias."""
     try:
-        # Leer registro del usuario
+        # Procesar archivo del usuario
         user_df = pd.read_excel(user_file)
-        user_df.columns = user_df.columns.str.strip().str.lower().str.replace(' ', '_')
-        rename_dict_user = {
-            'hc': 'HC',
-            'paciente': 'Nombre',
-            'fecha': 'Fecha',
-            'hora': 'Hora',
-            'monto': 'Monto'
-        }
-        user_df = user_df.rename(columns=rename_dict_user)
-        user_df['HC'] = user_df['HC'].astype(str).str.strip()
-        user_df['Fecha'] = pd.to_datetime(user_df['Fecha'], errors='coerce', dayfirst=True).dt.date
-        if 'Monto' in user_df.columns:
-            user_df['Monto'] = user_df['Monto'].apply(clean_monto)
-        if 'Hora' not in user_df.columns:
-            user_df['Hora'] = np.nan
-
-        # Leer y combinar registros del hospital
-        hospital_dfs = []
-        for file in hospital_files:
-            df = pd.read_excel(file)
-            df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
-            rename_dict_hospital = {
-                'hc': 'HC',
-                'historia': 'HC',
-                'hono_impu1': 'Monto',
-                'fecha': 'Fecha',
-                'nombre': 'Nombre',
-                'apellido_nombre': 'Doctor'
-            }
-            df = df.rename(columns=rename_dict_hospital)
-            if 'HC' in df.columns:
-                df['HC'] = df['HC'].astype(str).str.strip()
-            if 'Fecha' in df.columns:
-                df['Fecha'] = pd.to_datetime(df['Fecha'], errors='coerce', dayfirst=True).dt.date
-            if 'Monto' in df.columns:
-                df['Monto'] = df['Monto'].apply(clean_monto)
-            if 'Hora' not in df.columns:
-                df['Hora'] = np.nan
-            relevant_cols = [col for col in ['HC', 'Nombre', 'Fecha', 'Hora', 'Monto'] if col in df.columns]
-            hospital_dfs.append(df[relevant_cols])
+        user_df = process_dataframe(user_df, user_file)
         
-        hospital_df = pd.concat(hospital_dfs, ignore_index=True).drop_duplicates(subset=['HC', 'Fecha'])
+        # Procesar archivos del hospital
+        hospital_dfs = []
+        
+        for file_path in hospital_files:
+            try:
+                df = pd.read_excel(file_path)
+                processed_df = process_dataframe(df, file_path)
+                
+                if len(processed_df) > 0:
+                    hospital_dfs.append(processed_df)
+                    
+            except Exception as e:
+                continue
+        
+        if not hospital_dfs:
+            raise Exception("No se pudieron procesar archivos del hospital")
+        
+        # Combinar archivos del hospital
+        hospital_df = pd.concat(hospital_dfs, ignore_index=True)
+        
+        # IMPORTANTE: NO eliminar duplicados aquí para preservar múltiples fechas
+        # hospital_df = hospital_df.drop_duplicates(subset=['HC', 'Fecha'], keep='first')
 
-        # Merge para encontrar discrepancias
+        # Realizar merge para encontrar discrepancias (HC + Fecha como clave compuesta)
         key_cols = ['HC', 'Fecha']
-        merged = user_df[key_cols + [col for col in ['Nombre', 'Hora', 'Monto'] if col in user_df.columns]].merge(
-            hospital_df[key_cols + [col for col in ['Nombre', 'Hora', 'Monto'] if col in hospital_df.columns]],
-            on=key_cols, how='outer', suffixes=('_user', '_hospital'), indicator=True)
-
-        # Extra en el registro propio (a favor)
+        
+        # Preparar columnas para el merge
+        user_merge_cols = [col for col in user_df.columns if col in key_cols + ['Nombre', 'Monto']]
+        hospital_merge_cols = [col for col in hospital_df.columns if col in key_cols + ['Nombre', 'Monto', 'Archivo_Origen', 'Tipo_Archivo']]
+        
+        merged = user_df[user_merge_cols].merge(
+            hospital_df[hospital_merge_cols],
+            on=key_cols, 
+            how='outer', 
+            suffixes=('_usuario', '_hospital'), 
+            indicator=True
+        )
+        
+        # Extra en registro del usuario (a favor) - cada HC + Fecha es un registro separado
         extra_user_mask = merged['_merge'] == 'left_only'
         extra_user = merged[extra_user_mask].copy()
+        
         if not extra_user.empty:
-            if 'Nombre_user' in extra_user.columns:
-                extra_user['Nombre'] = extra_user['Nombre_user'].combine_first(extra_user.get('Nombre_hospital', pd.Series(dtype=object)))
-            else:
-                extra_user['Nombre'] = extra_user.get('Nombre', np.nan)
-            if 'Monto_user' in extra_user.columns:
-                extra_user['Monto'] = extra_user['Monto_user'].combine_first(extra_user.get('Monto_hospital', pd.Series(dtype=float)))
-            else:
-                extra_user['Monto'] = extra_user.get('Monto', 0.0)
-            if 'Hora_user' in extra_user.columns:
-                extra_user['Hora'] = extra_user['Hora_user'].combine_first(extra_user.get('Hora_hospital', pd.Series(dtype=object)))
-            else:
-                extra_user['Hora'] = extra_user.get('Hora', np.nan)
-            extra_user = extra_user[key_cols + ['Nombre', 'Hora', 'Monto']]
+            # Limpiar y organizar columnas
+            extra_user['Nombre'] = extra_user.get('Nombre_usuario', extra_user.get('Nombre_hospital', ''))
+            extra_user['Monto'] = extra_user.get('Monto_usuario', extra_user.get('Monto_hospital', 0.0))
+            
+            # Agregar información específica del usuario si existe
+            if 'Hora' in user_df.columns:
+                user_extra_info = user_df[['HC', 'Fecha', 'Hora']].merge(extra_user[['HC', 'Fecha']], on=['HC', 'Fecha'], how='inner')
+                extra_user = extra_user.merge(user_extra_info, on=['HC', 'Fecha'], how='left')
+            
+            cols_to_keep = ['HC', 'Fecha', 'Nombre', 'Monto']
+            if 'Hora' in extra_user.columns:
+                cols_to_keep.append('Hora')
+            extra_user = extra_user[cols_to_keep]
         else:
-            extra_user = pd.DataFrame(columns=['HC', 'Fecha', 'Nombre', 'Hora', 'Monto'])
-
-        # Extra en el registro del hospital (en contra)
+            extra_user = pd.DataFrame(columns=['HC', 'Fecha', 'Nombre', 'Monto', 'Hora'])
+        
+        # Extra en registros del hospital (en contra) - cada HC + Fecha es un registro separado
         extra_hospital_mask = merged['_merge'] == 'right_only'
         extra_hospital = merged[extra_hospital_mask].copy()
+        
         if not extra_hospital.empty:
-            if 'Nombre_hospital' in extra_hospital.columns:
-                extra_hospital['Nombre'] = extra_hospital['Nombre_hospital'].combine_first(extra_hospital.get('Nombre_user', pd.Series(dtype=object)))
-            else:
-                extra_hospital['Nombre'] = extra_hospital.get('Nombre', np.nan)
-            if 'Monto_hospital' in extra_hospital.columns:
-                extra_hospital['Monto'] = extra_hospital['Monto_hospital'].combine_first(extra_hospital.get('Monto_user', pd.Series(dtype=float)))
-            else:
-                extra_hospital['Monto'] = extra_hospital.get('Monto', 0.0)
-            if 'Hora_hospital' in extra_hospital.columns:
-                extra_hospital['Hora'] = extra_hospital['Hora_hospital'].combine_first(extra_hospital.get('Hora_user', pd.Series(dtype=object)))
-            else:
-                extra_hospital['Hora'] = extra_hospital.get('Hora', np.nan)
-            extra_hospital = extra_hospital[key_cols + ['Nombre', 'Hora', 'Monto']]
+            extra_hospital['Nombre'] = extra_hospital.get('Nombre_hospital', extra_hospital.get('Nombre_usuario', ''))
+            extra_hospital['Monto'] = extra_hospital.get('Monto_hospital', extra_hospital.get('Monto_usuario', 0.0))
+            
+            # Agregar información específica del hospital
+            hospital_extra_info = hospital_df[['HC', 'Fecha', 'Archivo_Origen', 'Tipo_Archivo']].merge(
+                extra_hospital[['HC', 'Fecha']], on=['HC', 'Fecha'], how='inner')
+            extra_hospital = extra_hospital.merge(hospital_extra_info, on=['HC', 'Fecha'], how='left')
+            
+            # Agregar columnas específicas según el tipo de archivo
+            for _, row in extra_hospital.iterrows():
+                hc, fecha, tipo = row['HC'], row['Fecha'], row.get('Tipo_Archivo', '')
+                
+                # Buscar información adicional según el tipo de archivo
+                hospital_row = hospital_df[(hospital_df['HC'] == hc) & 
+                                         (hospital_df['Fecha'] == fecha) & 
+                                         (hospital_df['Tipo_Archivo'] == tipo)]
+                
+                if not hospital_row.empty:
+                    if tipo == 'planes' and 'Cobertura' in hospital_row.columns:
+                        extra_hospital.loc[extra_hospital.index[_], 'Cobertura'] = hospital_row['Cobertura'].iloc[0]
+                    elif tipo == 'pami' and 'Desgrupo' in hospital_row.columns:
+                        extra_hospital.loc[extra_hospital.index[_], 'Desgrupo'] = hospital_row['Desgrupo'].iloc[0]
+                    elif tipo == 'ooss' and 'Desc_Cob' in hospital_row.columns:
+                        extra_hospital.loc[extra_hospital.index[_], 'Desc_Cob'] = hospital_row['Desc_Cob'].iloc[0]
+            
+            cols_to_keep = ['HC', 'Fecha', 'Nombre', 'Monto', 'Archivo_Origen', 'Tipo_Archivo']
+            
+            # Agregar columnas específicas si existen
+            for col in ['Cobertura', 'Desgrupo', 'Desc_Cob']:
+                if col in extra_hospital.columns:
+                    cols_to_keep.append(col)
+                    
+            extra_hospital = extra_hospital[cols_to_keep]
         else:
-            extra_hospital = pd.DataFrame(columns=['HC', 'Fecha', 'Nombre', 'Hora', 'Monto'])
-
-        # Ordenar
-        cols = ['Nombre', 'Fecha', 'Hora', 'HC', 'Monto']
-        extra_user = extra_user[cols].sort_values(by=['Nombre', 'Fecha'])
-        extra_hospital = extra_hospital[cols].sort_values(by=['Nombre', 'Fecha'])
-
-        # Resumen
+            extra_hospital = pd.DataFrame(columns=['HC', 'Fecha', 'Nombre', 'Monto', 'Archivo_Origen', 'Tipo_Archivo'])
+        
+        # Ordenar resultados por Nombre y Fecha para mostrar múltiples fechas por paciente
+        extra_user = extra_user.sort_values(by=['Nombre', 'Fecha']).reset_index(drop=True)
+        extra_hospital = extra_hospital.sort_values(by=['Nombre', 'Fecha']).reset_index(drop=True)
+        
+        # Crear estadísticas por historia clínica para el resumen
+        user_stats = extra_user.groupby('HC').agg({
+            'Fecha': 'count',
+            'Monto': 'sum',
+            'Nombre': 'first'
+        }).rename(columns={'Fecha': 'Cantidad_Fechas'}).reset_index()
+        
+        hospital_stats = extra_hospital.groupby('HC').agg({
+            'Fecha': 'count', 
+            'Monto': 'sum',
+            'Nombre': 'first'
+        }).rename(columns={'Fecha': 'Cantidad_Fechas'}).reset_index()
+        
+        # Crear resumen general
         summary = pd.DataFrame({
-            'Tipo': ['Extra en mi registro (a favor)', 'Extra en hospital (en contra)'],
-            'Cantidad': [len(extra_user), len(extra_hospital)],
-            'Monto Total': [extra_user['Monto'].sum() if len(extra_user) > 0 else 0.0, 
-                           extra_hospital['Monto'].sum() if len(extra_hospital) > 0 else 0.0]
+            'Concepto': [
+                'Registros en mi archivo',
+                'Registros en hospital (total)',
+                'Extra en mi registro (registros)',
+                'Extra en hospital (registros)',
+                'Extra en mi registro (pacientes únicos)',
+                'Extra en hospital (pacientes únicos)',
+                'Diferencia neta (registros)',
+                'Diferencia neta (monto)'
+            ],
+            'Cantidad': [
+                len(user_df),
+                len(hospital_df),
+                len(extra_user),
+                len(extra_hospital),
+                len(user_stats),
+                len(hospital_stats),
+                len(extra_user) - len(extra_hospital),
+                extra_user['Monto'].sum() - extra_hospital['Monto'].sum()
+            ]
         })
+        
+        # Crear resumen por tipo de archivo del hospital
+        if not extra_hospital.empty and 'Tipo_Archivo' in extra_hospital.columns:
+            hospital_summary = extra_hospital.groupby('Tipo_Archivo').agg({
+                'HC': 'count',
+                'Monto': 'sum'
+            }).reset_index()
+            hospital_summary.columns = ['Tipo_Archivo', 'Cantidad_Registros', 'Monto_Total']
+        else:
+            hospital_summary = pd.DataFrame(columns=['Tipo_Archivo', 'Cantidad_Registros', 'Monto_Total'])
 
         # Determinar ruta de salida
         if output_dir is None:
@@ -130,11 +305,31 @@ def compare_records(user_file, hospital_files, output_dir=None):
         
         output_file = os.path.join(output_dir, 'discrepancias_pacientes.xlsx')
 
-        # Exportar
+        # Exportar resultados con más hojas
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            # Resumen general
+            summary.to_excel(writer, sheet_name='Resumen_General', index=False)
+            
+            # Resumen por tipo de hospital
+            hospital_summary.to_excel(writer, sheet_name='Resumen_Hospital', index=False)
+            
+            # Registros extra del usuario (cada registro por separado)
             extra_user.to_excel(writer, sheet_name='Extra_Mi_Registro', index=False)
+            
+            # Registros extra del hospital (cada registro por separado)
             extra_hospital.to_excel(writer, sheet_name='Extra_Hospital', index=False)
-            summary.to_excel(writer, sheet_name='Resumen', index=False)
+            
+            # Estadísticas por paciente (HC) - usuario
+            if not user_stats.empty:
+                user_stats.to_excel(writer, sheet_name='Stats_Mi_Registro', index=False)
+            
+            # Estadísticas por paciente (HC) - hospital  
+            if not hospital_stats.empty:
+                hospital_stats.to_excel(writer, sheet_name='Stats_Hospital', index=False)
+            
+            # Datos originales para referencia
+            user_df.to_excel(writer, sheet_name='Datos_Usuario', index=False)
+            hospital_df.to_excel(writer, sheet_name='Datos_Hospital', index=False)
 
         return output_file
 
@@ -144,7 +339,7 @@ def compare_records(user_file, hospital_files, output_dir=None):
 class ComparadorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Comparador de Pacientes 1.3.2 - by RenzoRossiBrun")
+        self.root.title("Comparador de Registros de Pacientes - V: 2.3.1 - by RenzoRossiBrun")
         self.root.geometry("600x500")
         
         # Variables
